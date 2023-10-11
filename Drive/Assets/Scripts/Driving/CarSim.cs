@@ -1,14 +1,13 @@
 using System;
 using System.Collections;
-using System.Collections.Generic;
 using System.Linq;
-using Unity.VisualScripting;
 using UnityEngine;
 public enum CarSoundType
 {
     SQUEAK,
     RATTLE,
     SCRAPE,
+    SHIFT,
 }
 
 enum GearChangeDirection
@@ -91,10 +90,15 @@ public class CarSim : MonoBehaviour
     [SerializeField] GameObject steeringWheel;
 
     const float RPM_TO_PITCH_FACTOR = 2000.0f;
+    const float MAX_STEERING_WHEEL_TURN_ANGLE = 30.0f;
+    const float SHIFT_BLOCK_TIMER = 2.5f;
 
     [SerializeField] WheelPair[] wheelPairs = new WheelPair[4];
 
+    [SerializeField] Rigidbody carRididbody;
+
     //We store lots of these so we can choose a random misc car sound to play when needed
+    [Serializable]
     class CarSound
     {
         public AudioClip sound;
@@ -128,17 +132,65 @@ public class CarSim : MonoBehaviour
         StartEngine();
     }
 
-    void PlayCarSoundOfType(CarSoundType TypeToPlay)
+    AudioSource PlayCarSoundOfType(CarSoundType TypeToPlay)
     {
-        CarSound Found = miscCarSounds.Where(x => x.soundType == TypeToPlay).FirstOrDefault();
+        CarSound[] Found = miscCarSounds.Where(x => x.soundType == TypeToPlay).ToArray();
+        if (Found == null)
+        {
+            return null;
+        }
+        int Rand = UnityEngine.Random.Range(0, Found.Length - 1);
+        AudioSource ToReturn = null;
         if (Found != null)
         {
-            AudioManager.Instance.PlayAudioClip(Found.sound);
+            AudioManager.Instance.PlayAudioClip(Found[Rand].sound, out ToReturn);
         }
+
+        return ToReturn;
     }
 
-    void SwitchGear(GearChangeDirection Direction)
+    void SwitchGear(GearChangeDirection Direction, bool ForceReverse = false)
     {
+        if (changingGear)
+        {
+            return;
+        }
+
+        if (!ForceReverse)
+        {
+            switch (Direction)
+            {
+                case GearChangeDirection.UP:
+                    {
+                        if (currentGear + 1 > maxGear)
+                        {
+                            return;
+                        }
+                        break;
+                    }
+
+                case GearChangeDirection.DOWN:
+                    {
+                        if (currentGear - 1 <= 0)
+                        {
+                            return;
+                        }
+                        break;
+                    }
+            }
+        }
+       
+        StartCoroutine(WaitForShift(PlayCarSoundOfType(CarSoundType.SHIFT), Direction, ForceReverse));
+    }
+
+    //DON'T CALL THIS DIRECTLY!! Call SwitchGearInstead
+    void ActualShift(GearChangeDirection Direction, bool ForceReverse = false)
+    {
+        if (ForceReverse)
+        {
+            currentGear = Gear.REVERSE;
+            return;
+        }
         switch (Direction)
         {
             case GearChangeDirection.UP:
@@ -157,13 +209,31 @@ public class CarSim : MonoBehaviour
                     if (currentGear - 1 > 0)
                     {
                         currentGear--;
-                        currentRpm = maxRpm - UnityEngine.Random.Range(0.0f, maxRandomRpmShift);
+                        if (currentGear != Gear.NEUTRAL)
+                        {
+                            currentRpm = maxRpm - UnityEngine.Random.Range(0.0f, maxRandomRpmShift);
+                        }
                         return;
                     }
                     break;
                 }
         }
     }
+
+    IEnumerator WaitForShift(AudioSource ToListen, GearChangeDirection Direction, bool ForceReverse = false)
+    {
+        if (!ToListen)
+        {
+            yield break;
+        }
+        changingGear = true;
+        yield return new WaitUntil(()=> !ToListen.isPlaying);
+        ActualShift(Direction, ForceReverse);
+        yield return new WaitForSeconds(SHIFT_BLOCK_TIMER);
+        changingGear = false;
+    }
+
+    bool changingGear = false;
 
     void FixedUpdate()
     {
@@ -252,6 +322,16 @@ public class CarSim : MonoBehaviour
 
     void TickEngine()
     {
+        if (loopedSourceRef)
+        {
+            loopedSourceRef.pitch = currentRpm / RPM_TO_PITCH_FACTOR;
+        }
+
+        if (changingGear)
+        {
+            return;
+        }
+
         if (currentRpm + UnityEngine.Random.Range(0.0f, maxRandomRpmShift) >= maxRpm)
         {
             SwitchGear(GearChangeDirection.UP);
@@ -260,22 +340,22 @@ public class CarSim : MonoBehaviour
         {
             SwitchGear(GearChangeDirection.DOWN);
         }
-
-        if (loopedSourceRef)
-        {
-            loopedSourceRef.pitch = currentRpm / RPM_TO_PITCH_FACTOR;
-        }
     }
 
+    int countAngle = 0;
     void GetInput()
     {
         //TODO move to input mgr
         if (Input.GetKey(KeyCode.W))
         {
-            //if (currentGear == Gear.NEUTRAL)
-            //{
-            //    SwitchGear(GearChangeDirection.UP);
-            //}
+            if (!changingGear)
+            {
+                if (currentGear == Gear.NEUTRAL || currentGear == Gear.REVERSE)
+                {
+                    SwitchGear(GearChangeDirection.UP);
+                    return;
+                }
+            }
             if (currentRpm < maxRpm)
             {
                 currentRpm += rpmAddition/* * Time.deltaTime*/;
@@ -284,15 +364,16 @@ public class CarSim : MonoBehaviour
         }
         if (Input.GetKey(KeyCode.S))
         {
-            //if (currentGear == Gear.NEUTRAL /*&& speed ==0 goto reverse*/)
-            //{
-            //    SwitchGear(GearChangeDirection.DOWN);
-            //    return;
-            //}
+            if (currentGear == Gear.NEUTRAL && CarStopped())
+            {
+                SwitchGear(GearChangeDirection.DOWN, ForceReverse: true);
+                return;
+            }
             if (currentRpm > idleRpm)
             {
                 currentRpm -= rpmAddition /** Time.deltaTime*/;
             }
+
             UpdateWheelColliders(wheelDriveMode, maxBrakeForce * Input.GetAxis("Vertical"));
         }
 
@@ -301,11 +382,36 @@ public class CarSim : MonoBehaviour
         UpdateWheelColliders(WheelDriveMode.FWD, TurnForce: TurnAmount);
         if (steeringWheel)
         {
-            steeringWheel.transform.Rotate(new(0.0f, 1.0f, 0.0f), TurnAmount);
+            bool CanTurn = false;
+            if (TurnAmount > 0)
+            {
+                if (countAngle < MAX_STEERING_WHEEL_TURN_ANGLE)
+                {
+                    countAngle++;   //Track turn manually as dealing with rots is a pain in the proverbial backside on firebase
+                    CanTurn = true;
+                }
+            }
+            else if (TurnAmount < 0)
+            {
+                if (countAngle > -MAX_STEERING_WHEEL_TURN_ANGLE)
+                {
+                    countAngle--;
+                    CanTurn = true;
+                }
+            }
+            if (CanTurn)
+            {
+                steeringWheel.transform.Rotate(new(0.0f, 1.0f, 0.0f), TurnAmount);
+            }
         }
         if (currentRpm > idleRpm)
         {
             currentRpm -= rpmDeduction;
         }
+    }
+
+    bool CarStopped()
+    {
+        return Mathf.Approximately(Mathf.Round(carRididbody.velocity.x), 0.0f) && Mathf.Approximately(Mathf.Round(carRididbody.velocity.y), 0.0f);
     }
 }

@@ -70,6 +70,17 @@ public class AudioManager : MonoBehaviour
         FreeSource.PlayOneShot(ClipToPlay);
     }
 
+    public void PlayAudioClip(AudioClip ClipToPlay, out AudioSource GetActualSource, bool RandomPitch = false)
+    {
+        AudioSource FreeSource = GetFreeSourceFromPool();
+        if (RandomPitch)
+        {
+            FreeSource.pitch -= Random.Range(-RANDOM_PITCH_RANGE, RANDOM_PITCH_RANGE);
+        }
+        FreeSource.PlayOneShot(ClipToPlay);
+        GetActualSource = FreeSource;
+    }
+
     public void PlayLoopedAudioClip(AudioClip ClipToPlay, out AudioSource GetActualSource, bool OnlyPermitOne = true, bool EndLoop = false, bool IsMusic = false)
     {
         GetActualSource = null;
